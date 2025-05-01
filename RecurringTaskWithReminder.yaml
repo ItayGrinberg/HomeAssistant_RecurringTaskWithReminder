@@ -1,0 +1,170 @@
+blueprint:
+  name: Recurring Task with Reminders
+  description: >
+    Sends a recurring notification at a user-defined time and date. 
+    When triggered, a task is added to a selected to-do list, and a notification is sent to the user. 
+    The notification includes an action to mark the task as done, which removes the to-do item. 
+    If not removed, reminders are sent at the chosen interval until the task is done.
+  domain: automation
+  input:
+    todo_list:
+      name: To-do List
+      description: The to-do list where the task should be created
+      selector:
+        entity:
+          domain: todo
+    todo_task_text:
+      name: Task Name
+      description: Label for the recurring task to be added to the to-do list
+      selector:
+        text: {}
+    first_notification_date:
+      name: First Notification Date
+      description: The date when the first notification should be sent
+      selector:
+        date: {}
+    task_interval_days:
+      name: Task Interval (Days)
+      description: Number of days between each task creation
+      selector:
+        number:
+          min: 1
+          max: 365
+          unit_of_measurement: days
+          mode: slider
+    reminder_interval_minutes:
+      name: Reminder Interval (Minutes)
+      description: How often to remind if the task is not acknowledged
+      selector:
+        number:
+          min: 1
+          max: 28
+          unit_of_measurement: days
+          mode: slider
+    notification_time:
+      name: Notification Time
+      description: Time of day to send the notification
+      selector:
+        time: {}
+    notification_title:
+      name: Notification Message
+      description: The notification message text
+      selector:
+        text: {}
+    notify_target:
+      name: Mobile Device to Notify
+      description: The mobile device to send the notification to
+      selector:
+        device:
+          integration: mobile_app
+
+variables:
+  title: !input notification_title
+  task_interval: !input task_interval_days
+  reminder_interval: !input reminder_interval_minutes
+  todo_entity: !input todo_list
+  task_text: !input todo_task_text
+  notify_target: !input notify_target
+  action_id: "MARK_TASK_DONE_{{ task_text | slugify }}"
+  task_found: false
+  first_notification_date: !input first_notification_date
+  is_first_date_reached: >
+    {{ now().date() >= (first_notification_date | as_datetime).date() }}
+
+trigger:
+  - platform: time
+    at: !input notification_time
+
+mode: restart
+
+action:
+  - alias: "Check if today is on or after first_notification_date"
+    condition: template
+    value_template: "{{ is_first_date_reached }}"
+  - alias: "Add task to to-do list"
+    action: todo.add_item
+    data:
+      item: "{{task_text}}"
+    target:
+      entity_id: "{{ todo_entity }}"
+  - alias: "Send initial notification with action"
+    service: notify.mobile_app_{{ notify_target | device_attr('name') | lower | replace(' ', '_') }}
+    data:
+      title: "{{ title }}"
+      message: "Task: {{ task_text }}. Tap to mark it as done."
+      data:
+        actions:
+          - action: "{{action_id}}"
+            title: "Done"
+  - alias: "Wait for a response 1"
+    wait_for_trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: "{{ action_id }}"
+    timeout:
+      days: "{{ reminder_interval }}"
+    continue_on_timeout: true
+  - alias: "perform the action 1"
+    choose:
+      - conditions: "{{ wait.trigger.event.data.action == action_id }}"
+        sequence:
+          - alias: "Remove task when notification action tapped"
+            service: todo.remove_item
+            target:
+              entity_id: "{{ todo_entity }}"
+            data:
+              item: "{{ task_text }}"
+  - alias: "get items1"
+    service: todo.get_items
+    data:
+      entity_id: "{{todo_entity}}"
+    response_variable: "todo_items1"
+  - variables:
+      task_found: >
+        {{ task_text in todo_items1[todo_entity]['items'] | map(attribute='summary') | list }}
+  - alias: "Repeat reminders until task is removed"
+    repeat:
+      while:
+        - condition: template
+          value_template: "{{task_found}}"
+      sequence:
+        - sequence:
+            - service: notify.mobile_app_{{ notify_target | device_attr('name') | lower | replace(' ', '_') }}
+              data:
+                title: "{{ title }}"
+                message: "Reminder: Task '{{ task_text }}' is still pending."
+                data:
+                  actions:
+                    - action: "{{action_id}}"
+                      title: "Done"
+            - alias: "Wait for a response"
+              wait_for_trigger:
+                - platform: event
+                  event_type: mobile_app_notification_action
+                  event_data:
+                    action: "{{ action_id }}"
+              timeout:
+                days: "{{ reminder_interval }}"
+              continue_on_timeout: true
+            - alias: "perform the action"
+              choose:
+                - conditions: "{{ wait.trigger.event.data.action == action_id }}"
+                  sequence:
+                    - alias: "Remove task when notification action tapped"
+                      service: todo.remove_item
+                      target:
+                        entity_id: "{{ todo_entity }}"
+                      data:
+                        item: "{{ task_text }}"
+            - alias: "get items1"
+              service: todo.get_items
+              data:
+                entity_id: "{{todo_entity}}"
+              response_variable: "todo_items2"
+            - variables:
+                task_found: >
+                  {{ task_text in todo_items2[todo_entity]['items'] | map(attribute='summary') | list }}
+  - alias: "Wait until next task cycle"
+    delay:
+      days: "{{ task_interval }}"
