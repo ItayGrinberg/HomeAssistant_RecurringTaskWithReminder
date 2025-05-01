@@ -33,7 +33,7 @@ blueprint:
           unit_of_measurement: days
           mode: slider
     reminder_interval_minutes:
-      name: Reminder Interval (Minutes)
+      name: Reminder Interval (Days)
       description: How often to remind if the task is not acknowledged
       selector:
         number:
