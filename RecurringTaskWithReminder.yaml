@@ -75,9 +75,18 @@ trigger:
   - platform: time
     at: !input notification_time
 
-mode: restart
+#condition:
+#  - alias: "check if automation is running"
+#    condition: state
+#    entity_id: "{{ this.entity_id }}"
+#    state: "off"
+
+mode: single
 
 action:
+  - variables:
+      is_first_date_reached: >
+        {{ now().date() >= (first_notification_date | as_datetime).date() }}
   - alias: "Check if today is on or after first_notification_date"
     condition: template
     value_template: "{{ is_first_date_reached }}"
@@ -165,6 +174,7 @@ action:
             - variables:
                 task_found: >
                   {{ task_text in todo_items2[todo_entity]['items'] | map(attribute='summary') | list }}
-  - alias: "Wait until next task cycle"
-    delay:
-      days: "{{ task_interval }}"
+  - variables:
+      first_notification_date: >
+        {{ (now() + timedelta(days=task_interval - 1)).strftime('%Y-%m-%d') }}
+  - wait_template: "{{ now().date() >= (first_notification_date | as_datetime).date() }}"
