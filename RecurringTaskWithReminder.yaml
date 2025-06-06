@@ -1,10 +1,9 @@
 blueprint:
-  name: Recurring Task with Reminders3
+  name: Recurring Task with Time-Based Notifications and Reminders
   description: >
-    Sends a recurring notification at a user-defined time and date. 
-    When triggered, a task is added to a selected to-do list, and a notification is sent to the user. 
-    The notification includes an action to mark the task as done, which removes the to-do item. 
-    If not removed, reminders are sent at the chosen interval until the task is done.
+    Sends a recurring notification at a set time and date, and reminds the user at the defined frequency, if necessary. 
+    Creates a task in a designated to-do list to track the open tasks. Allows the user to mark the task as done via 
+    the notification or manually in the to-do list. Automatically schedules the next task date or reminder depending on user interaction.
   domain: automation
   input:
     todo_list:
@@ -13,6 +12,18 @@ blueprint:
       selector:
         entity:
           domain: todo
+    next_notification_tracker:
+      name: Next Notification Tracker
+      description: A Date helper that stores the next notification date
+      selector:
+        entity:
+          domain: input_datetime
+    next_reminder_tracker:
+      name: Next Reminder Tracker
+      description: A Date helper that stores the next reminder date
+      selector:
+        entity:
+          domain: input_datetime
     todo_task_text:
       name: Task Name
       description: Label for the recurring task to be added to the to-do list
@@ -32,7 +43,7 @@ blueprint:
           max: 365
           unit_of_measurement: days
           mode: slider
-    reminder_interval_minutes:
+    reminder_interval_days:
       name: Reminder Interval (Days)
       description: How often to remind if the task is not acknowledged
       selector:
@@ -41,13 +52,22 @@ blueprint:
           max: 28
           unit_of_measurement: days
           mode: slider
+    wait_for_response_minutes:
+      name: Wait for Response Duration (Minutes)
+      description: How long to wait for the user’s response before clearing until the next reminder is due (max 4 hours)
+      selector:
+        number:
+          min: 1
+          max: 240 # max 4 hours
+          unit_of_measurement: minutes
+          mode: slider
     notification_time:
       name: Notification Time
       description: Time of day to send the notification
       selector:
         time: {}
     notification_title:
-      name: Notification Message
+      name: Notification Title
       description: The notification message text
       selector:
         text: {}
@@ -61,234 +81,142 @@ blueprint:
 variables:
   title: !input notification_title
   task_interval: !input task_interval_days
-  reminder_interval: !input reminder_interval_minutes
+  reminder_interval: !input reminder_interval_days
   todo_entity: !input todo_list
   task_text: !input todo_task_text
   notify_target: !input notify_target
   action_id: "MARK_TASK_DONE_{{ task_text | slugify }}"
-  task_found: false
   first_notification_date: !input first_notification_date
-  is_first_date_reached: >
-    {{ now().date() >= (first_notification_date | as_datetime).date() }}
+  notification_time: !input notification_time
+  next_notification_tracker: !input next_notification_tracker
+  next_reminder_tracker: !input next_reminder_tracker
+  wait_for_response_minutes: !input wait_for_response_minutes
 
 trigger:
   - platform: time
     at: !input notification_time
+  - platform: state
+    entity_id: !input todo_list
 
-#condition:
-#  - alias: "check if automation is running"
-#    condition: state
-#    entity_id: "{{ this.entity_id }}"
-#    state: "off"
-
-mode: single
+condition:
+  - condition: template
+    value_template: >
+      {% if trigger.platform == 'time' %}
+        {% set first_dt = first_notification_date | as_datetime %}
+        {% set next_dt = states(next_notification_tracker) | as_datetime %}
+        {% set reminder_dt = states(next_reminder_tracker) | as_datetime %}
+        {% set latest_dt = [first_dt, next_dt, reminder_dt] | max %}
+        {{ now().date() == latest_dt.date() }}
+      {% else %}
+        true
+      {% endif %}
 
 action:
-  - variables:
-      is_first_date_reached: >
-        {{ now().date() >= (first_notification_date | as_datetime).date() }}
-  - alias: "Check if today is on or after first_notification_date"
-    condition: template
-    value_template: "{{ is_first_date_reached }}"
-  - alias: "Check if task already exists in the to-do list"
+  - alias: "Ensure next_notification_tracker aligns with first_notification_date"
+    variables:
+      first_notification_dt: "{{ first_notification_date | as_datetime }}"
+      next_notification_dt: "{{ states(next_notification_tracker) | as_datetime }}"
+  - choose:
+      - conditions: "{{ next_notification_dt.date() < first_notification_dt.date() }}"
+        sequence:
+          - service: input_datetime.set_datetime
+            target:
+              entity_id: "{{ next_notification_tracker }}"
+            data:
+              date: "{{ first_notification_date }}"
+
+  - alias: "Check if task exists in the to-do list"
     service: todo.get_items
     data:
       entity_id: "{{ todo_entity }}"
       status: needs_action
-    response_variable: todo_items_check
+    response_variable: todo_items
 
   - variables:
-      task_already_exists: >
-        {{ task_text in todo_items_check[todo_entity]['items'] | map(attribute='summary') | list }}
+      task_exists: >
+        {{ task_text in todo_items[todo_entity]['items'] | map(attribute='summary') | list }}
 
-  - alias: "Add task if not already in the list"
+  - alias: "Handle manual task completion"
     choose:
-      - conditions: "{{ not task_already_exists }}"
+      - conditions: >
+          {{ (not task_exists) and 
+             (states(next_notification_tracker) | as_datetime).date() < now().date() }}
+        sequence:
+          - alias: "Task was completed manually, schedule next notification"
+            service: input_datetime.set_datetime
+            target:
+              entity_id: "{{ next_notification_tracker }}"
+            data:
+              date: >
+                {{ (now() + timedelta(days=task_interval)).strftime('%Y-%m-%d') }}
+          - stop: "Stop automation since task was completed manually."
+
+  - alias: "Add task if not present"
+    choose:
+      - conditions: "{{ not task_exists }}"
         sequence:
           - service: todo.add_item
             data:
               item: "{{ task_text }}"
             target:
               entity_id: "{{ todo_entity }}"
-  - alias: "Send initial notification with action"
+
+  - alias: "Send notification with action button"
     service: notify.mobile_app_{{ notify_target | device_attr('name') | lower | replace(' ', '_') }}
     data:
       title: "{{ title }}"
       message: "Task: {{ task_text }}. Tap to mark it as done."
       data:
+        tag: "{{ task_text }}"
         actions:
-          - action: "{{action_id}}"
+          - action: "{{ action_id }}"
             title: "Done"
-  # Initial timestamp when waiting starts
-  - variables:
-      wait_start_ts: "{{ now().timestamp() }}"
-      wait_timeout_ts: "{{ wait_start_ts + (reminder_interval | int) * 86400 }}"
-  - alias: "Wait for notification or task removal, with timeout"
-    repeat:
-      sequence:
-        - variables:
-            stop_condition: false
 
-        # Wait for trigger with short timeout (polling interval)
-        - wait_for_trigger:
-            - platform: event
-              event_type: mobile_app_notification_action
-              event_data:
-                action: "{{ action_id }}"
-          timeout:
-            seconds: 30
-          continue_on_timeout: true
-        - alias: "perform the action 1"
-          choose:
-            - conditions: "{{ wait.trigger.event.data.action == action_id }}"
-              sequence:
-                - alias: "Remove task when notification action tapped"
-                  service: todo.remove_item
-                  target:
-                    entity_id: "{{ todo_entity }}"
-                  data:
-                    item: "{{ task_text }}"
-                - variables:
-                    stop_condition: true
+  - alias: "Wait for response window"
+    wait_for_trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          tag: "{{ task_text }}"
+          action: "{{ action_id }}"
+    timeout:
+      minutes: "{{ wait_for_response_minutes }}"
+    continue_on_timeout: true
 
-        # Check current time
-        - variables:
-            current_ts: "{{ now().timestamp() }}"
-            timeout_reached: "{{ current_ts >= wait_timeout_ts }}"
+  - choose:
+      - conditions: "{{ wait.trigger and wait.trigger.event.data.action == action_id }}"
+        sequence:
+          - alias: "Remove task from to-do list"
+            service: todo.remove_item
+            target:
+              entity_id: "{{ todo_entity }}"
+            data:
+              item: "{{ task_text }}"
+          - alias: "Schedule next notification"
+            service: input_datetime.set_datetime
+            target:
+              entity_id: "{{ next_notification_tracker }}"
+            data:
+              date: >
+                {{ (now() + timedelta(days=task_interval)).strftime('%Y-%m-%d') }}
 
-        # Exit if time is up
-        - choose:
-            - conditions: "{{ timeout_reached }}"
-              sequence:
-                - variables:
-                    stop_condition: true
-
-        # Get current to-do list items
-        - service: todo.get_items
-          data:
-            entity_id: "{{ todo_entity }}"
-            status: needs_action
-          response_variable: todo_items_check
-
-        # Check if task is still on the list
-        - variables:
-            task_still_exists: >
-              {{ task_text in todo_items_check[todo_entity]['items'] | map(attribute='summary') | list }}
-
-        # Exit if task was removed
-        - choose:
-            - conditions: "{{ not task_still_exists }}"
-              sequence:
-                - variables:
-                    stop_condition: true
-
-      # Continue loop only if trigger was not received
-      while:
-        - condition: template
-          value_template: >
-            {{ not stop_condition }}
-
-  - alias: "get items1"
-    service: todo.get_items
-    data:
-      entity_id: "{{todo_entity}}"
-      status: needs_action
-    response_variable: "todo_items1"
-  - variables:
-      task_found: >
-        {{ task_text in todo_items1[todo_entity]['items'] | map(attribute='summary') | list }}
-  - alias: "Repeat reminders until task is removed"
-    repeat:
-      while:
-        - condition: template
-          value_template: "{{task_found}}"
-      sequence:
-        - sequence:
-            - service: notify.mobile_app_{{ notify_target | device_attr('name') | lower | replace(' ', '_') }}
+  - choose:
+      - conditions: "{{ not wait.trigger }}"
+        sequence:
+          - alias: "Schedule next reminder"
+            service: input_datetime.set_datetime
+            target:
+              entity_id: "{{ next_reminder_tracker }}"
+            data:
+              date: >
+                {{ (now() + timedelta(days=reminder_interval)).strftime('%Y-%m-%d') }}
+          - alias: "remove notifcation"
+            service:
+              notify.mobile_app_{{ notify_target | device_attr('name') | lower
+              | replace(' ', '_') }}
+            data:
+              message: clear_notification
               data:
-                title: "{{ title }}"
-                message: "Reminder: Task '{{ task_text }}' is still pending."
-                data:
-                  actions:
-                    - action: "{{action_id}}"
-                      title: "Done"
-            - variables:
-                wait_start_ts: "{{ now().timestamp() }}"
-                wait_timeout_ts: "{{ wait_start_ts + (reminder_interval | int) * 86400 }}"
-            - alias: "Wait for notification or task removal, with timeout"
-              repeat:
-                sequence:
-                  - variables:
-                      stop_condition: false
+                tag: "{{ task_text }}"
 
-                  # Wait for trigger with short timeout (polling interval)
-                  - wait_for_trigger:
-                      - platform: event
-                        event_type: mobile_app_notification_action
-                        event_data:
-                          action: "{{ action_id }}"
-                    timeout:
-                      seconds: 30
-                    continue_on_timeout: true
-                  - alias: "perform the action 1"
-                    choose:
-                      - conditions: "{{ wait.trigger.event.data.action == action_id }}"
-                        sequence:
-                          - alias: "Remove task when notification action tapped"
-                            service: todo.remove_item
-                            target:
-                              entity_id: "{{ todo_entity }}"
-                            data:
-                              item: "{{ task_text }}"
-                          - variables:
-                              stop_condition: true
-
-                  # Check current time
-                  - variables:
-                      current_ts: "{{ now().timestamp() }}"
-                      timeout_reached: "{{ current_ts >= wait_timeout_ts }}"
-
-                  # Exit if time is up
-                  - choose:
-                      - conditions: "{{ timeout_reached }}"
-                        sequence:
-                          - variables:
-                              stop_condition: true
-
-                  # Get current to-do list items
-                  - service: todo.get_items
-                    data:
-                      entity_id: "{{ todo_entity }}"
-                      status: needs_action
-                    response_variable: todo_items_check
-
-                  # Check if task is still on the list
-                  - variables:
-                      task_still_exists: >
-                        {{ task_text in todo_items_check[todo_entity]['items'] | map(attribute='summary') | list }}
-
-                  # Exit if task was removed
-                  - choose:
-                      - conditions: "{{ not task_still_exists }}"
-                        sequence:
-                          - variables:
-                              stop_condition: true
-
-                # Continue loop only if trigger was not received
-                while:
-                  - condition: template
-                    value_template: >
-                      {{ not stop_condition }}
-            - alias: "get items1"
-              service: todo.get_items
-              data:
-                entity_id: "{{todo_entity}}"
-                status: needs_action
-              response_variable: "todo_items2"
-            - variables:
-                task_found: >
-                  {{ task_text in todo_items2[todo_entity]['items'] | map(attribute='summary') | list }}
-  - variables:
-      first_notification_date: >
-        {{ (now() + timedelta(days=task_interval - 1)).strftime('%Y-%m-%d') }}
-  - wait_template: "{{ now().date() >= (first_notification_date | as_datetime).date() }}"
+mode: single
