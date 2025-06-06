@@ -1,4 +1,4 @@
-# Recurring Task with Time-Based Notifications and Reminders (v4)
+# Recurring Task with Time-Based Notifications and Reminders
 
 This Home Assistant automation blueprint sends recurring notifications at a set time and date, with reminders at a defined frequency if needed. It creates a task in a designated to-do list to track open tasks and allows marking tasks as done either via notification action or manually in the to-do list. The blueprint automatically schedules the next task or reminder date based on user interaction.
 
