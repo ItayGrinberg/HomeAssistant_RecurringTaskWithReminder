@@ -150,12 +150,12 @@ action:
               date: >
                 {{ (now() + timedelta(days=task_interval)).strftime('%Y-%m-%d') }}
           - stop: "Stop automation since task was completed manually."
-- alias: "Stop if not time trigger"
-  choose:
-    - conditions: >
-        {{ not (trigger.platform == 'time') }}
-      sequence:
-        - stop: "Stop automation since time is not due."
+  - alias: "Stop if not time trigger"
+    choose:
+      - conditions: >
+          {{ not (trigger.platform == 'time') }}
+        sequence:
+          - stop: "Stop automation since time is not due."
   - alias: "Add task if not present"
     choose:
       - conditions: "{{ not task_exists }}"
